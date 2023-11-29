@@ -58,12 +58,12 @@ int nlbrctl::add_bridge(const char* bridge_name) {
     struct iovec    iov;
     
     struct {
-        //struct sockaddr_nl     nladdr                   = { 0 };
+        struct sockaddr_nl     nladdr                   = { 0 };
         struct nlmsghdr        header                   = { 0 };
         struct ifinfomsg       if_info                  = { 0 };
-        //struct msghdr          body;
-       // struct nlattr          nla                      = { 0 };
-       // char                   buf[MAX_BUFFER_SIZE];
+        struct msghdr          body                     = { 0 };
+        struct nlattr          nla                      = { 0 };
+        char                   buf[MAX_BUFFER_SIZE];
     } msg;
 
     // reset struct
@@ -92,9 +92,9 @@ int nlbrctl::add_bridge(const char* bridge_name) {
         return -1; 
 	}
 
-    int test2 = 1;
-    if (setsockopt(rthandle.fd, SOL_NETLINK, NETLINK_EXT_ACK, &test2, sizeof(test2)) < 0) {
-        ERROR("failed to set receive buffer size: %d\n", errno);
+    int ext_dummy = true;
+    if (setsockopt(rthandle.fd, SOL_NETLINK, NETLINK_EXT_ACK, &ext_dummy, sizeof(ext_dummy)) < 0) {
+        ERROR("failed to set extended ack report: %d\n", errno);
         close(rthandle.fd);
         return -1; 
 	}
@@ -126,9 +126,9 @@ int nlbrctl::add_bridge(const char* bridge_name) {
         return -1; 
 	}
 
-    int test = 1;
-    if (setsockopt(rthandle.fd, SOL_NETLINK, NETLINK_GET_STRICT_CHK, &test, sizeof(test)) < 0) {
-        ERROR("failed to set receive buffer size: %d\n", errno);
+    int chk_dummy = true;
+    if (setsockopt(rthandle.fd, SOL_NETLINK, NETLINK_GET_STRICT_CHK, &chk_dummy, sizeof(chk_dummy)) < 0) {
+        ERROR("failed to set netlink input checking: %d\n", errno);
         close(rthandle.fd);
         return -1; 
 	}
@@ -145,12 +145,33 @@ int nlbrctl::add_bridge(const char* bridge_name) {
     msg.if_info.ifi_flags   = 0;
     msg.if_info.ifi_change  = 0;
     
-    if (sendto(rthandle.fd, &msg, sizeof(msg), 0, (struct sockaddr *)&rthandle.local, sizeof(rthandle.local)) < 0) {
+    // strace wrong decompile that code, and print wrong packet body :/
+    struct rtattr* ifname_place = nlbrctl::add_place(&msg.header, sizeof(msg), IFLA_IFNAME);
+    nlbrctl::add_atribute_without_bound(&msg.header, strlen(bridge_name)+1, sizeof(msg), bridge_name, IFLA_IFNAME);
+    add_place_end(&msg.header, ifname_place);
+    struct rtattr* linkinfo_place = nlbrctl::add_place(&msg.header, sizeof(msg), IFLA_LINKINFO);
+    struct rtattr* infokind_place = nlbrctl::add_place(&msg.header, sizeof(msg), IFLA_INFO_KIND);
+    nlbrctl::add_atribute_without_bound(&msg.header, strlen("bridge"), sizeof(msg), "bridge", IFLA_LINKINFO);
+    add_place_end(&msg.header, infokind_place);
+    add_place_end(&msg.header, linkinfo_place);
+
+    iov.iov_base            = &msg.header;
+    iov.iov_len             = msg.header.nlmsg_len;
+
+    msg.nladdr.nl_family    = AF_NETLINK;
+
+    msg.body.msg_name       = &msg.nladdr;
+    msg.body.msg_namelen    = sizeof(msg.nladdr);
+    msg.body.msg_iov        = &iov;
+    msg.body.msg_iovlen     = 1;
+
+    if (sendmsg(rthandle.fd, &msg.body, 0) < 0) {
         ERROR("failed to send message: %d\n", errno);
         close(rthandle.fd);
         return -1;
-    } 
+    }
     
+    /* ONLY FOR DEBUG, DONT PAY ATTENTION */
     char buf[1024];
     struct nlmsghdr *nlh;
     struct ifinfomsg *ifinfo;
@@ -163,71 +184,7 @@ int nlbrctl::add_bridge(const char* bridge_name) {
         return -1;
     }
 
-    // Парсинг ответа
-    for (nlh = (struct nlmsghdr *)buf; NLMSG_OK(nlh, ret); nlh = NLMSG_NEXT(nlh, ret)) {
-        if (nlh->nlmsg_type == NLMSG_ERROR) {
-            struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
-            if (err->error != 0) {
-                fprintf(stderr, "Netlink error: %s\n", strerror(-err->error));
-                close(rthandle.fd);
-                return -1;
-            }
-        } else if (nlh->nlmsg_type == NLMSG_DONE) {
-            break;
-        }
-    }
-    
-    struct {
-        struct sockaddr_nl     nladdr                   = { 0 };
-        struct nlmsghdr        header                   = { 0 };
-        struct ifinfomsg       if_info                  = { 0 };
-        struct msghdr          body                     = { 0 };
-        struct nlattr          nla                      = { 0 };
-        char                   buf[MAX_BUFFER_SIZE];
-    } rmsg;
-
-    rmsg.header = msg.header;
-    rmsg.if_info = msg.if_info;
-
-    struct rtattr* temp = nlbrctl::add_place(&rmsg.header, sizeof(rmsg), IFLA_IFNAME);
-    nlbrctl::add_atribute_without_bound(&rmsg.header, strlen(bridge_name)+1, sizeof(rmsg), bridge_name, IFLA_IFNAME);
-    add_place_end(&rmsg.header, temp);
-
-    struct rtattr* link = nlbrctl::add_place(&rmsg.header, sizeof(rmsg), IFLA_LINKINFO);
-    //nlbrctl::add_atribute_without_bound(&rmsg.header, 0, sizeof(rmsg), NULL, IFLA_LINKINFO);
-
-    struct rtattr* rlink = nlbrctl::add_place(&rmsg.header, sizeof(rmsg), IFLA_INFO_KIND);
-    nlbrctl::add_atribute_without_bound(&rmsg.header, strlen("bridge"), sizeof(rmsg), "bridge", IFLA_LINKINFO);
-    add_place_end(&rmsg.header, rlink);
-    add_place_end(&rmsg.header, link);
-
-    iov.iov_base            = &rmsg.header;
-    iov.iov_len             = rmsg.header.nlmsg_len;
-
-    rmsg.nladdr.nl_family    = AF_NETLINK;
-
-    rmsg.body.msg_name       = &rmsg.nladdr;
-    rmsg.body.msg_namelen    = sizeof(rmsg.nladdr);
-    rmsg.body.msg_iov        = &iov;
-    rmsg.body.msg_iovlen     = 1;
-
-    rmsg.body.msg_iov        = &iov;
-    rmsg.body.msg_iovlen     = 1;
-
-    if (sendmsg(rthandle.fd, &rmsg.body, 0) < 0) {
-        ERROR("failed to send message: %d\n", errno);
-        close(rthandle.fd);
-        return -1;
-    } 
-
-    ret = recv(rthandle.fd, buf, sizeof(buf), 0);
-    if (ret < 0) {
-        perror("recv");
-        close(rthandle.fd);
-        return -1;
-    }
-
-    // Парсинг ответа
+    // recv parse
     for (nlh = (struct nlmsghdr *)buf; NLMSG_OK(nlh, ret); nlh = NLMSG_NEXT(nlh, ret)) {
         if (nlh->nlmsg_type == NLMSG_ERROR) {
             struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nlh);
